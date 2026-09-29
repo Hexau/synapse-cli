@@ -24,8 +24,13 @@ export const PALETTE_ACTIONS: PaletteAction[] = [
   { label: "Compact", value: "/compact", hint: "compact this chat's history" },
   { label: "Prompts", value: "/prompts", hint: "list this project's prompt shortcuts" },
   { label: "Run prompt", value: "/run ", hint: "run a project prompt shortcut — type its name" },
+  { label: "Goal", value: "/goal", hint: "show the active session goal" },
+  { label: "Set goal", value: "/goal ", hint: "give the agent an objective to keep working toward — type it" },
+  { label: "Pause goal", value: "/goal pause", hint: "stop auto-continuation without losing progress" },
+  { label: "Resume goal", value: "/goal resume", hint: "resume a paused goal — nudges the agent right away" },
   { label: "Clear chat", value: "/clear", hint: "reset this chat" },
   { label: "Theme", value: "/theme", hint: "switch color theme" },
+  { label: "Trace", value: "/trace", hint: "write a redacted diagnostic file to share when reporting a bug" },
   { label: "Help", value: "/help", hint: "list all slash commands" },
 ];
 

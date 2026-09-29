@@ -9,6 +9,9 @@ import { runSkillCommand } from "./commands/skill.js";
 import { runAgentCommand } from "./commands/agent.js";
 import { runConfigCommand } from "./commands/config.js";
 import { runChatCommand } from "./commands/chat.js";
+import { runDiffCommand } from "./commands/diff.js";
+import { runMultiRunCommand } from "./commands/multirun.js";
+import { runPolicyCommand } from "./commands/policy.js";
 
 const cli = meow(
   `
@@ -32,9 +35,22 @@ const cli = meow(
     $ synapse chat reset [id]          Reset a chat (defaults to this directory's)
     $ synapse chat delete <id>         Delete a chat
     $ synapse chat logs [id]           Show recent log entries for a chat
+    $ synapse diff <repo_slug> [ref]   Step through an agent's changes hunk by hunk
+    $ synapse multirun start <repo> <task_slug> <prompt> --variants a,b
+                                       Fan out a task to N agents in parallel worktrees
+    $ synapse multirun status <run_id> Check a multi-run's progress/result
+    $ synapse multirun pick <repo> <run_id> <variant>
+                                       Merge the winning variant, discard the rest
+    $ synapse policy list              List remembered allow/deny rules
+    $ synapse policy remember <tool> <allow|deny> <args_json>
+    $ synapse policy forget <action_id>
+    $ synapse policy audit [n]         Show the last n policy decisions
+    $ synapse policy pending           List tool calls currently blocked awaiting approval
+    $ synapse policy approve <action_id>
+    $ synapse policy deny <action_id>
 
   Inside a chat session, slash commands work too: /model, /skill, /agent,
-  /clear, /compact, /pause, /resume, /help, /exit
+  /clear, /compact, /pause, /resume, /trace, /help, /exit
 
   Options
     --token <t>     API token (from /api/my_account after logging into the WebUI)
@@ -45,18 +61,23 @@ const cli = meow(
     flags: {
       token: { type: "string" },
       server: { type: "string" },
+      variants: { type: "string" },
+      agentProfile: { type: "string" },
     },
   }
 );
 
 const [command, ...rest] = cli.input;
 
-const commands: Record<string, (args: string[]) => Promise<void>> = {
+const commands: Record<string, (args: string[], flags: Record<string, unknown>) => Promise<void>> = {
   model: runModelCommand,
   skill: runSkillCommand,
   agent: runAgentCommand,
   config: runConfigCommand,
   chat: runChatCommand,
+  diff: runDiffCommand,
+  multirun: runMultiRunCommand,
+  policy: runPolicyCommand,
 };
 
 if (command === "login") {
@@ -76,7 +97,7 @@ if (command === "login") {
   console.log("Synapse config updated.");
   process.exit(0);
 } else if (command && commands[command]) {
-  commands[command](rest)
+  commands[command](rest, cli.flags)
     .then(() => process.exit(process.exitCode ?? 0))
     .catch((err: Error) => {
       console.error(`Error: ${err.message}`);

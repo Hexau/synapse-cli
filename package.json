@@ -20,6 +20,7 @@
   "dependencies": {
     "@inkjs/ui": "^1.0.0",
     "@synapse/protocol": "file:./vendor/synapse-protocol-0.1.0.tgz",
+    "@synapse/tokens": "file:./vendor/synapse-tokens-0.1.0.tgz",
     "ink": "^4.4.1",
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^5.0.1",

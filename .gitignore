@@ -1,0 +1,13 @@
+node_modules/
+dist/
+
+# Per-directory local session pointer (helpers/config.ts::resolveContextId)
+# — generated on first run, not shared config.
+.synapse/
+
+# A stray `npm pack` output at the repo root, not the vendored deps this
+# package consumes (those live under vendor/, which IS committed).
+/synapse-cli-*.tgz
+
+.env
+*.log

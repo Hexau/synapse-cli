@@ -6,6 +6,7 @@ import {
   SynapseWsClient,
   SynapseRestClient,
   ConnectorEvent,
+  SessionGoal,
   createLocalFileOpHandler,
   createLocalExecOpHandler,
   buildRemoteTreeSnapshot,
@@ -17,6 +18,7 @@ import { Markdown } from "./components/Markdown.js";
 import { QueuedMessages } from "./components/QueuedMessages.js";
 import { HelpHint } from "./components/HelpHint.js";
 import { LaunchScreen } from "./components/LaunchScreen.js";
+import { TokenHud } from "./components/TokenHud.js";
 import { THEMES, resolveTheme, Theme } from "./theme.js";
 
 // The server only injects the remote file structure into the agent's
@@ -26,6 +28,7 @@ import { THEMES, resolveTheme, Theme } from "./theme.js";
 const REMOTE_TREE_REFRESH_MS = 60_000;
 import { resolveServerUrl, resolveApiToken, resolveContextId, resolveThemeName, setThemeName } from "./config.js";
 import { listPrompts, expandPrompt } from "./prompts.js";
+import { buildTraceMarkdown, writeTraceFile, TraceLogEvent } from "./lib/trace.js";
 
 interface ChatSummary {
   id: string;
@@ -257,8 +260,38 @@ export default function App({ projectDir }: { projectDir: string }) {
   // that so /chat's picker can still switch the active session mid-run
   // without restarting the CLI.
   const [contextId, setContextId] = useState<string | null>(null);
+  // ws.onComplete/onError are registered once at mount (see the ws setup
+  // effect below, deps [serverUrl, apiToken] — contextId isn't in there), so
+  // referencing `contextId` state directly inside them would read the
+  // mount-time value forever. Same fix as liveLinesRef above.
+  const contextIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    contextIdRef.current = contextId;
+  }, [contextId]);
   const serverUrl = useMemo(() => resolveServerUrl(), []);
   const apiToken = useMemo(() => resolveApiToken(), []);
+
+  // Fase 2 - C*HUD de tokens + meta: refreshed once per completed turn (see
+  // ws.onComplete below) — token_status.py's own docstring notes ctx_window
+  // only changes inside prepare_prompt (an LLM turn), so per-turn is exactly
+  // as fresh as this data ever gets; no separate polling loop needed.
+  const [tokenStatus, setTokenStatus] = useState<{ tokenCount: number | null; contextWindow: number | null }>({
+    tokenCount: null,
+    contextWindow: null,
+  });
+  const [sessionGoal, setSessionGoal] = useState<SessionGoal | null>(null);
+  const refreshHud = React.useCallback(async () => {
+    const rc = restRef.current;
+    const ctxId = contextIdRef.current;
+    if (!rc || !ctxId) return;
+    try {
+      const [ts, sg] = await Promise.all([rc.getTokenStatus(ctxId), rc.getSessionGoal(ctxId)]);
+      setTokenStatus({ tokenCount: ts.token_count, contextWindow: ts.context_window });
+      setSessionGoal(sg.goal);
+    } catch {
+      // Best-effort — the HUD just keeps showing its last known values.
+    }
+  }, []);
 
   // Set once the WS/REST clients are actually constructed (end of the mount
   // effect below) — <LaunchScreen> needs restRef.current to call
@@ -379,6 +412,11 @@ export default function App({ projectDir }: { projectDir: string }) {
       // Turn finished — freeze it (see commitLiveLines) so Ink stops
       // redrawing this potentially-large response on every future frame.
       commitLiveLines(trailing);
+      // Token/goal HUD: refresh right after the turn that just changed them
+      // (see refreshHud's comment — this is exactly as fresh as the data
+      // backing it ever gets). Fire-and-forget: refreshHud itself never
+      // throws, and the HUD isn't worth blocking the queue drain below on.
+      void refreshHud();
       // If the user queued messages while this turn was running (see
       // handleSubmit), send the next one now instead of waiting for them
       // to resubmit it by hand.
@@ -389,6 +427,7 @@ export default function App({ projectDir }: { projectDir: string }) {
     ws.onError((err) => {
       setBusy(false);
       commitLiveLines([{ sequence: Date.now(), event: "error", text: err.message }]);
+      void refreshHud();
       const next = dequeueMessage();
       if (next) sendToAgent(next);
     });
@@ -597,6 +636,41 @@ export default function App({ projectDir }: { projectDir: string }) {
           setThemeName(rest[0]);
           appendStatus(`Theme switched to ${rest[0]}`);
         }
+      } else if (cmd === "/goal" && !rest[0]) {
+        if (!sessionGoal) {
+          appendStatus("No active goal. Use /goal <objective> to set one.");
+        } else {
+          appendStatus(
+            `Goal: ${sessionGoal.status} — "${sessionGoal.objective}" ` +
+              `(${sessionGoal.turns_used} turn${sessionGoal.turns_used === 1 ? "" : "s"})` +
+              (sessionGoal.note ? ` — ${sessionGoal.note}` : "")
+          );
+        }
+      } else if (cmd === "/goal" && rest[0] === "clear") {
+        await rc.clearSessionGoal(contextId);
+        setSessionGoal(null);
+        appendStatus("Goal cleared.");
+      } else if (cmd === "/goal" && rest[0] === "pause") {
+        const result = await rc.pauseSessionGoal(contextId);
+        setSessionGoal(result.goal);
+        appendStatus(
+          result.goal.status === "paused"
+            ? "Goal paused — auto-continuation stopped. Use /goal resume to pick it back up."
+            : `Goal not paused (status: ${result.goal.status}).`
+        );
+      } else if (cmd === "/goal" && rest[0] === "resume") {
+        const result = await rc.resumeSessionGoal(contextId);
+        setSessionGoal(result.goal);
+        appendStatus(
+          result.goal.status === "active"
+            ? "Goal resumed — the agent is picking up where it left off."
+            : `Goal not resumed (status: ${result.goal.status}).`
+        );
+      } else if (cmd === "/goal" && rest.length > 0) {
+        const objective = rest.join(" ");
+        const result = await rc.setSessionGoal(contextId, objective);
+        setSessionGoal(result.goal);
+        appendStatus(`Goal set: "${objective}" — the agent will keep working toward it after each turn.`);
       } else if (cmd === "/clear") {
         await rc.resetChat(contextId);
         clearTerminal();
@@ -611,6 +685,47 @@ export default function App({ projectDir }: { projectDir: string }) {
       } else if (cmd === "/resume") {
         await rc.pause(contextId, false);
         appendStatus("Agent resumed.");
+      } else if (cmd === "/trace") {
+        // Best-effort — a trace that's missing recent activity because the
+        // server is unreachable is still more useful than no trace at all,
+        // so a failed logTail becomes a note in the file rather than
+        // aborting the whole command (see buildTraceMarkdown's logError).
+        let logEvents: TraceLogEvent[] = [];
+        let logError: string | undefined;
+        try {
+          const history = (await rc.logTail(contextId, 0, 50)) as {
+            events?: Array<{
+              sequence: number;
+              event: string;
+              timestamp?: string;
+              data?: { text?: string; heading?: string };
+            }>;
+          };
+          logEvents = (history.events ?? []).map((e) => ({
+            sequence: e.sequence,
+            event: e.event,
+            heading: e.data?.heading,
+            text: e.data?.text,
+            timestamp: e.timestamp,
+          }));
+        } catch (err) {
+          logError = err instanceof Error ? err.message : String(err);
+        }
+        const markdown = buildTraceMarkdown({
+          serverUrl,
+          apiTokenConfigured: Boolean(apiToken),
+          contextId,
+          projectDir,
+          connected,
+          ready,
+          activePreset,
+          tokenStatus,
+          sessionGoal,
+          logEvents,
+          logError,
+        });
+        const filePath = writeTraceFile(markdown);
+        appendStatus(`Trace written to ${filePath} — review before sharing.`);
       } else if (cmd === "/prompts") {
         const templates = listPrompts();
         if (!templates.length) {
@@ -835,6 +950,12 @@ export default function App({ projectDir }: { projectDir: string }) {
         <Text dimColor> — context {contextId} — {projectDir}</Text>
         {activePreset ? <Text dimColor> — model: {activePreset}</Text> : null}
         {!ready ? <Text color="yellow"> (preparing chat...)</Text> : null}
+        <TokenHud
+          theme={theme}
+          tokenCount={tokenStatus.tokenCount}
+          contextWindow={tokenStatus.contextWindow}
+          goal={sessionGoal}
+        />
       </Box>
 
       <Static items={groupToolCards(staticLines)}>

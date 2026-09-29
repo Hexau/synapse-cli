@@ -16,6 +16,12 @@ const COMMANDS: [string, string][] = [
   ["/resume", "resume a paused agent"],
   ["/prompts", "list this project's prompt shortcuts (.synapse/prompts/)"],
   ["/run <name>", "run a project prompt shortcut with optional args"],
+  ["/goal", "show the active session goal, if any"],
+  ["/goal <objective>", "give the agent an objective — it keeps working toward it after each turn"],
+  ["/goal pause", "pause auto-continuation without losing progress"],
+  ["/goal resume", "resume a paused goal — nudges the agent to continue right away"],
+  ["/goal clear", "clear the active goal"],
+  ["/trace", "write a redacted diagnostic file to share when reporting a bug"],
   ["/exit", "quit the CLI"],
 ];
 
